@@ -10,11 +10,11 @@ exports.createResume = async (req, res) => {
   await conn.beginTransaction();
 
   try {
-    // Insert into users
+    // Insert into users linked to logged-in user
     const [userResult] = await conn.execute(
-      `INSERT INTO users (name, role, phone, email, linkedin, github, summary, has_experience)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      [name, role, phone, email, linkedin, github, summary, hasExperience]
+      `INSERT INTO users (auth_user_id, name, role, phone, email, linkedin, github, summary, has_experience)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [req.user.id, name, role, phone, email, linkedin, github, summary, hasExperience]
     );
     const userId = userResult.insertId;
 
@@ -97,8 +97,11 @@ exports.getResumeById = async (req, res) => {
   const conn = await db.getConnection();
 
   try {
-    const [[user]] = await conn.query('SELECT * FROM users WHERE id = ?', [id]);
-    if (!user) return res.status(404).json({ error: 'Resume not found' });
+    const [[user]] = await conn.query(
+      'SELECT * FROM users WHERE id = ? AND auth_user_id = ?',
+      [id, req.user.id]
+    );
+    if (!user) return res.status(404).json({ error: 'Resume not found or unauthorized' });
 
     const [experiences] = await conn.query('SELECT * FROM experiences WHERE user_id = ?', [id]);
     for (const exp of experiences) {
@@ -139,6 +142,15 @@ exports.deleteResumeById = async (req, res) => {
   const conn = await db.getConnection();
 
   try {
+    // Ensure ownership
+    const [[resumeOwner]] = await conn.query(
+      'SELECT * FROM users WHERE id = ? AND auth_user_id = ?',
+      [id, req.user.id]
+    );
+    if (!resumeOwner) {
+      return res.status(403).json({ error: 'Unauthorized to delete this resume' });
+    }
+
     await conn.beginTransaction();
 
     // Delete responsibilities linked to experiences
@@ -160,15 +172,31 @@ exports.deleteResumeById = async (req, res) => {
     await conn.query('DELETE FROM certifications WHERE user_id = ?', [id]);
     await conn.query('DELETE FROM projects WHERE user_id = ?', [id]);
 
-    // Finally delete the user
+    // Finally delete the user (resume entry)
     await conn.query('DELETE FROM users WHERE id = ?', [id]);
 
     await conn.commit();
-    res.status(204).end(); // No content
+    res.status(204).end();
   } catch (err) {
     await conn.rollback();
     console.error(`Error deleting resume with ID ${id}:`, err);
     res.status(500).json({ error: 'Failed to delete resume' });
+  } finally {
+    conn.release();
+  }
+};
+
+exports.getMyResumes = async (req, res) => {
+  const conn = await db.getConnection();
+  try {
+    const [resumes] = await conn.query(
+      'SELECT id, name, role, email, phone, linkedin, github, summary, has_experience FROM users WHERE auth_user_id = ?',
+      [req.user.id]
+    );
+    res.json(resumes);
+  } catch (err) {
+    console.error('Error fetching user resumes:', err);
+    res.status(500).json({ error: 'Internal server error' });
   } finally {
     conn.release();
   }
